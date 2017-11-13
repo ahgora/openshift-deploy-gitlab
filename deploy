@@ -1,0 +1,59 @@
+#!/bin/bash
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+
+export DEPLOY_ROOT_DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+
+source "$DEPLOY_ROOT_DIR/src/common.bash"
+
+if [[ -z "$CI_ENVIRONMENT_URL" ]]; then
+  echo "Reading CI_ENVIRONMENT_URL from .gitlab-ci.yml..."
+  CI_ENVIRONMENT_URL="$(ruby -ryaml -e 'puts YAML.load_file(".gitlab-ci.yml")[ENV["CI_BUILD_NAME"]]["environment"]["url"]')"
+  CI_ENVIRONMENT_URL="$(eval echo "$CI_ENVIRONMENT_URL")"
+  echo "CI_ENVIRONMENT_URL: $CI_ENVIRONMENT_URL"
+fi
+
+ensure_deploy_variables
+create_kubeconfig
+
+export
+if ! oc project "$KUBE_NAMESPACE" &> /dev/null; then
+  echo "Creating namespace: $KUBE_NAMESPACE..."
+  oc new-project "$KUBE_NAMESPACE"
+fi
+
+if ! is_openshift; then
+  echo "Currently only OpenShift is supported!"
+  exit 1
+fi
+
+#if oc get deployment "${CI_ENVIRONMENT_SLUG}" &>/dev/null; then
+  echo "Deleting old application..."
+  oc delete all -l "app=${CI_ENVIRONMENT_SLUG}" || true
+  echo ""
+#fi
+
+echo "Creating application..."
+oc new-app "--name=${CI_ENVIRONMENT_SLUG}" "$CI_REGISTRY_IMAGE:$CI_REGISTRY_TAG"
+echo ""
+
+echo "Waiting for deployment..."
+# kubectl rollout status "deployment/${CI_ENVIRONMENT_SLUG}"
+echo ""
+
+echo "Checking routes..."
+if ! oc get routes "${CI_ENVIRONMENT_SLUG}" &> /dev/null; then
+  echo "Creating routes..."
+  CI_ENVIRONMENT_HOSTNAME="${CI_ENVIRONMENT_URL}"
+  CI_ENVIRONMENT_HOSTNAME="${CI_ENVIRONMENT_HOSTNAME/http:\/\//}"
+  CI_ENVIRONMENT_HOSTNAME="${CI_ENVIRONMENT_HOSTNAME/https:\/\//}"
+  oc expose service "${CI_ENVIRONMENT_SLUG}" --hostname="${CI_ENVIRONMENT_HOSTNAME}"
+fi
+echo "Application is accessible at: ${CI_ENVIRONMENT_URL}"
+echo ""
+
